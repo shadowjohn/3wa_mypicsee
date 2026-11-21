@@ -1,0 +1,94 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          'RUSTUP_TOOLCHAIN=1.92.0-x86_64-pc-windows-msvc' >> $env:GITHUB_ENV
+      - name: Test Windows x64
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+      - name: Build Windows x64
+        shell: cmd
+        run: call build.bat
+      - name: Stage release inputs
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-release-input
+          path: |
+            dist/3wa_mypicsee.exe
+            dist/LICENSE
+            dist/THIRD_PARTY_NOTICES.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Validate release tag
+        shell: bash
+        run: |
+          version="$(tr -d '\r\n' < RELEASE_VERSION)"
+          [[ "$version" =~ ^[0-9]{8}\.[0-9]{3}$ ]]
+          [[ "$GITHUB_REF_NAME" == "v$version" ]]
+          date -d "${version:0:4}-${version:4:2}-${version:6:2}" >/dev/null
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-release-input
+          path: release-input
+      - name: Package portable Windows x64 ZIP
+        shell: bash
+        run: |
+          cp README.md release-input/
+          mkdir -p release-output
+          name="3wa_mypicsee-v$APP_VERSION-windows-x64"
+          (cd release-input && zip "../release-output/$name.zip" 3wa_mypicsee.exe LICENSE THIRD_PARTY_NOTICES.txt README.md)
+      - name: Build Windows installer
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y nsis
+          cp assets/app.ico release-input/
+          makensis \
+            "-DINPUT_DIR=$GITHUB_WORKSPACE/release-input" \
+            "-DOUTPUT_FILE=$GITHUB_WORKSPACE/release-output/3wa_mypicsee-v$APP_VERSION-windows-x64-setup.exe" \
+            "-DAPP_VERSION=$APP_VERSION" installer/mypicsee.nsi
+      - name: Create checksums
+        shell: bash
+        run: |
+          cd release-output
+          sha256sum 3wa_mypicsee-* > SHA256SUMS.txt
+      - name: Publish version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release-output/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

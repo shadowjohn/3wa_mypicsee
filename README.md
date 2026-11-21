@@ -26,4 +26,9 @@ cargo run --locked --release -- "C:\Photos\IMG_001.jpg"
 
 試用版識別為 `20261122.001`，Cargo 版本獨立採 SemVer。圖示與已定稿的 3wa 袖章版「咪卡」放在 `assets/`；生成提示見 [snapshot/avatar/avatar_prompt.md](snapshot/avatar/avatar_prompt.md)。
 
-MIT，見 [LICENSE](LICENSE)。正式發行前依實際打包的套件和內嵌素材彙整第三方授權。GitHub Actions 發行、更新、GIF 動畫、多頁 TIFF 與縮圖牆不在目前試用版。
+MIT，見 [LICENSE](LICENSE)。正式發行前依實際打包的套件和內嵌素材彙整第三方授權。自動更新、GIF 動畫、多頁 TIFF 與縮圖牆不在目前試用版。
+## Windows 打包與發版
+
+- 本機使用 `build.bat` 編譯 Windows x64，產物在 `dist\3wa_mypicsee.exe`。
+- GitHub Actions 會在 main 更新與 PR 上跑 Windows 編譯和測試，不會建立版本。將 `RELEASE_VERSION` 更新成 `YYYYMMDD.NNN`，再推送同值加 `v` 前綴的 tag，才會產生 GitHub Release。
+- Release 提供免安裝 ZIP、安裝檔與 SHA-256；安裝檔內可勾選加入 Windows「開啟方式」的圖檔格式。不會自動取代預設看圖程式。
