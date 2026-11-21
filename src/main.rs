@@ -48,9 +48,13 @@ struct Viewer {
     scale: Option<f32>,
     pan: Vec2,
     lock_pan: bool,
+    reset_pan_on_swap: bool,
     has_detail: bool,
     loading: bool,
     wheel_points: f32,
+    about_open: bool,
+    about_has_cjk: Option<bool>,
+    fullscreen: bool,
     error: Option<String>,
 }
 
@@ -61,19 +65,13 @@ impl Viewer {
         let pipeline = pipeline::Pipeline::new(move || repaint.request_repaint());
 
         // Opening a named image must not wait on the artwork.
-        let mascot = initial.is_none().then(|| {
-            let image = image::load_from_memory(include_bytes!("../assets/mika-3wa.png")).ok()?;
-            let image = image.thumbnail(480, 480).to_rgba8();
-            Some(ctx.load_texture("mika", ColorImage::from_rgba_unmultiplied(
-                [image.width() as usize, image.height() as usize], image.as_raw(),
-            ), TextureOptions::LINEAR))
-        }).flatten();
+        let mascot = if initial.is_none() { load_mascot(ctx) } else { None };
 
         let mut viewer = Self {
             pipeline, mascot, selected: None, displayed: None, paths: Vec::new(),
             generation: 0, folder_generation: Arc::new(AtomicU64::new(0)),
             folder_tx, folder_rx, picker: None, scale: None, pan: Vec2::ZERO,
-            lock_pan: false, has_detail: false, loading: false, wheel_points: 0.0, error: None,
+            lock_pan: false, reset_pan_on_swap: false, has_detail: false, loading: false, wheel_points: 0.0, about_open: false, about_has_cjk: None, fullscreen: false, error: None,
         };
         if let Some(path) = initial { viewer.open(ctx, path); }
         viewer
@@ -94,7 +92,7 @@ impl Viewer {
         let repaint = ctx.clone();
         self.paths = vec![path.clone()];
         self.selected = Some(path.clone());
-        self.pan = Vec2::ZERO;
+        self.reset_pan_on_swap = true;
         self.has_detail = false;
         self.request(PREVIEW_EDGE, 1, true);
 
@@ -162,7 +160,8 @@ impl Viewer {
         let next = index.saturating_add_signed(step as isize).min(self.paths.len() - 1);
         if next == index { return; }
         self.selected = Some(self.paths[next].clone());
-        if !self.lock_pan { self.pan = Vec2::ZERO; }
+        // The old texture remains visible while a foreground load is pending.
+        self.reset_pan_on_swap |= !self.lock_pan;
         self.has_detail = false;
         self.request(PREVIEW_EDGE, step, true);
     }
@@ -198,16 +197,24 @@ impl Viewer {
                         [pixels.width as usize, pixels.height as usize], &pixels.rgba,
                     );
                     let texture = ctx.load_texture("selected-photo", rgba, TextureOptions::LINEAR);
-                    self.displayed = Some(Displayed { texture, natural });
+                    self.swap_display(Displayed { texture, natural });
                     self.error = None;
                 }
                 Err(error) if was_loading => {
+                    self.reset_pan_on_swap = false;
                     self.displayed = None;
                     self.error = Some(error);
                 }
                 Err(_) => (),
             }
         }
+    }
+
+    fn swap_display(&mut self, display: Displayed) {
+        if std::mem::take(&mut self.reset_pan_on_swap) {
+            self.pan = Vec2::ZERO;
+        }
+        self.displayed = Some(display);
     }
 
     fn fit(&mut self, viewport: Vec2) {
@@ -244,9 +251,30 @@ impl Viewer {
     }
 }
 
+fn viewer_status(ctx: &egui::Context, title: String, loading: bool) {
+    // A filename or a pending decode must not resize the image viewport.
+    egui::TopBottomPanel::bottom("status").exact_height(24.0).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            if loading { ui.add(egui::Spinner::new().size(14.0)); }
+            ui.add(egui::Label::new(&title).truncate()).on_hover_text(&title);
+        });
+    });
+}
+
 impl eframe::App for Viewer {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll(ctx);
+        let (f11, escape) = ctx.input(|i| (i.key_pressed(Key::F11), i.key_pressed(Key::Escape)));
+        if !self.about_open && (f11 || (self.fullscreen && escape)) {
+            self.fullscreen = !self.fullscreen;
+            if self.fullscreen {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+            } else {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            }
+        }
         let dropped = ctx.input(|i| i.raw.dropped_files.iter().find_map(|item| item.path.clone()));
         if let Some(path) = dropped { self.open(ctx, path); }
 
@@ -258,8 +286,8 @@ impl eframe::App for Viewer {
             }).collect::<Vec<_>>();
             (
                 i.modifiers.command && i.key_pressed(Key::O),
-                i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowUp),
-                i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::ArrowDown),
+                i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::ArrowUp) || i.key_pressed(Key::PageUp),
+                i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::PageDown),
                 star || (i.modifiers.shift && i.key_pressed(Key::Num8)),
                 i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals),
                 i.key_pressed(Key::Minus),
@@ -274,29 +302,29 @@ impl eframe::App for Viewer {
 
         let mut fit = star;
         let mut zoom = if plus { 1.25 } else if minus { 0.8 } else { 1.0 };
-        egui::TopBottomPanel::top("tools").show(ctx, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("PICSEE").strong().color(Color32::from_rgb(99, 219, 196)));
-                ui.separator();
-                if ui.button("Open…").on_hover_text("Ctrl+O").clicked() { self.choose_file(ctx); }
-                if ui.button("Prev").on_hover_text("Previous image").clicked() { self.navigate(-1); }
-                if ui.button("Next").on_hover_text("Next image").clicked() { self.navigate(1); }
-                ui.separator();
-                if ui.button("Fit *").on_hover_text("Fit the current image and lock the scale").clicked() { fit = true; }
-                if ui.button("−").clicked() { zoom = 0.8; }
-                ui.label(self.scale.map_or_else(|| "Fit".into(), |x| format!("{:.0}%", x * 100.0)));
-                if ui.button("+").clicked() { zoom = 1.25; }
-                ui.toggle_value(&mut self.lock_pan, "Lock pan (P)");
+        if !self.fullscreen {
+            egui::TopBottomPanel::top("tools").show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("PICSEE").strong().color(Color32::from_rgb(99, 219, 196)));
+                    ui.separator();
+                    if ui.button("Open…").on_hover_text("Ctrl+O").clicked() { self.choose_file(ctx); }
+                    if ui.button("Prev").on_hover_text("Previous image").clicked() { self.navigate(-1); }
+                    if ui.button("Next").on_hover_text("Next image").clicked() { self.navigate(1); }
+                    ui.separator();
+                    if ui.button("Fit *").on_hover_text("Fit the current image and lock the scale").clicked() { fit = true; }
+                    if ui.button("−").clicked() { zoom = 0.8; }
+                    ui.label(self.scale.map_or_else(|| "Fit".into(), |x| format!("{:.0}%", x * 100.0)));
+                    if ui.button("+").clicked() { zoom = 1.25; }
+                    ui.toggle_value(&mut self.lock_pan, "Lock pan (P)");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("About").clicked() { self.about_open = true; }
+                    });
+                });
+                ui.add_space(4.0);
             });
-            ui.add_space(4.0);
-        });
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(self.title_line());
-                if self.loading { ui.spinner(); }
-            });
-        });
+            viewer_status(ctx, self.title_line(), self.loading);
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::from_rgb(15, 20, 23)))
             .show(ctx, |ui| {
@@ -354,10 +382,134 @@ impl eframe::App for Viewer {
                         egui::FontId::proportional(15.0), Color32::LIGHT_GRAY);
                 }
             });
+
+        if self.about_open {
+            if ctx.input(|input| input.key_pressed(Key::Escape)) {
+                self.about_open = false;
+            } else {
+                if self.about_has_cjk.is_none() {
+                    self.about_has_cjk = Some(init_about_font(ctx));
+                    if self.mascot.is_none() { self.mascot = load_mascot(ctx); }
+                }
+                egui::Window::new("About PicSee")
+                    .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut self.about_open)
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if let Some(mika) = &self.mascot {
+                                let size = mika.size_vec2();
+                                ui.image((mika.id(), size * (120.0 / size.y)));
+                            }
+                            ui.vertical(|ui| {
+                                ui.heading("3wa_mypicsee");
+                                ui.label(format!("Version {}", VERSION.trim()));
+                                ui.label("An offline photo viewer.");
+                                ui.separator();
+                                if self.about_has_cjk == Some(true) {
+                                    ui.label("作者：阿寶");
+                                    ui.label("點子：羽山");
+                                } else {
+                                    ui.label("Author: Abao");
+                                    ui.label("Concept: Yushan");
+                                }
+                                ui.label("MIT License");
+                                ui.hyperlink_to("3wa.tw", "https://3wa.tw");
+                                ui.hyperlink_to("GitHub project", "https://github.com/shadowjohn/3wa_mypicsee");
+                            });
+                        });
+                    });
+            }
+        }
     }
+}
+
+fn load_mascot(ctx: &egui::Context) -> Option<TextureHandle> {
+    let image = image::load_from_memory(include_bytes!("../assets/mika-3wa.png")).ok()?;
+    let image = image.thumbnail(480, 480).to_rgba8();
+    Some(ctx.load_texture("mika", ColorImage::from_rgba_unmultiplied(
+        [image.width() as usize, image.height() as usize], image.as_raw(),
+    ), TextureOptions::LINEAR))
+}
+
+fn init_about_font(ctx: &egui::Context) -> bool {
+    // Do not bundle Windows fonts or touch them during a normal photo open.
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        for font in ["msjh.ttc", "mingliu.ttc", "msyh.ttc"] {
+            let path = PathBuf::from(&root).join("Fonts").join(font);
+            if let Ok(data) = std::fs::read(path) {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert("PicSee CJK fallback".into(), Arc::new(egui::FontData::from_owned(data)));
+                fonts.families.entry(egui::FontFamily::Proportional).or_default()
+                    .push("PicSee CJK fallback".into());
+                ctx.set_fonts(fonts);
+                return true;
+            }
+        }
+    }
+    let _ = ctx;
+    false
 }
 
 fn supported(path: &Path) -> bool {
     path.extension().and_then(|s| s.to_str())
         .is_some_and(|s| SUFFIXES.iter().any(|format| s.eq_ignore_ascii_case(format)))
+}
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+
+    #[test]
+    fn wheel_navigation_preserves_outgoing_photo_pan() {
+        let ctx = egui::Context::default();
+        let mut viewer = Viewer::new(&ctx, None);
+        viewer.paths = vec![PathBuf::from("first.png"), PathBuf::from("second.png")];
+        viewer.selected = Some(viewer.paths[0].clone());
+        viewer.displayed = Some(Displayed {
+            texture: ctx.load_texture("fixture", ColorImage::filled([1, 1], Color32::RED), TextureOptions::LINEAR),
+            natural: egui::vec2(400.0, 200.0),
+        });
+        viewer.pan = egui::vec2(35.0, 25.0);
+        viewer.scale = Some(0.5);
+
+        viewer.navigate(1);
+
+        assert_eq!(viewer.pan, egui::vec2(35.0, 25.0));
+        assert_eq!(viewer.scale, Some(0.5));
+        assert_eq!(viewer.displayed.as_ref().unwrap().natural, egui::vec2(400.0, 200.0));
+
+        let texture = viewer.displayed.as_ref().unwrap().texture.clone();
+        viewer.swap_display(Displayed { texture: texture.clone(), natural: egui::vec2(200.0, 400.0) });
+        assert_eq!(viewer.pan, Vec2::ZERO);
+        assert_eq!(viewer.scale, Some(0.5));
+
+        viewer.lock_pan = true;
+        viewer.pan = egui::vec2(10.0, 20.0);
+        viewer.navigate(-1);
+        viewer.swap_display(Displayed { texture, natural: egui::vec2(400.0, 200.0) });
+        assert_eq!(viewer.pan, egui::vec2(10.0, 20.0));
+    }
+
+    #[test]
+    fn status_does_not_resize_narrow_image_viewport() {
+        let ctx = egui::Context::default();
+        let mut areas = Vec::new();
+        for (name, loading) in [
+            ("short.png".to_string(), false),
+            (format!("{}.png", "long filename ".repeat(40)), true),
+            (format!("{}.png  |  5000 x 3000", "long filename ".repeat(40)), false),
+        ] {
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(180.0, 250.0))),
+                ..Default::default()
+            }, |ctx| {
+                viewer_status(ctx, name.clone(), loading);
+                areas.push(ctx.available_rect());
+            });
+        }
+        assert!(areas.iter().all(|&area| area == areas[0]), "{areas:?}");
+    }
 }

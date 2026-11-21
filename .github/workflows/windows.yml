@@ -66,7 +66,7 @@ jobs:
       - name: Package portable Windows x64 ZIP
         shell: bash
         run: |
-          cp README.md release-input/
+          cp README.portable.md release-input/README.md
           mkdir -p release-output
           name="3wa_mypicsee-v$APP_VERSION-windows-x64"
           (cd release-input && zip "../release-output/$name.zip" 3wa_mypicsee.exe LICENSE THIRD_PARTY_NOTICES.txt README.md)
