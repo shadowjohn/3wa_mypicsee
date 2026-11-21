@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+ <title>PicSee: turning a photograph</title>
+ <defs><linearGradient id="tile" x1="0" y1="0" x2="1" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#087F7C"/><stop offset="1" stop-color="#093D53"/></linearGradient></defs>
+ <rect x="6" y="6" width="244" height="244" rx="53" fill="url(#tile)"/>
+ <path d="M55 169v14q0 17 17 17h101" fill="none" stroke="#56B8AA" stroke-width="11" stroke-linecap="round"/>
+ <path d="M78 63h97l30 30v77q0 14-14 14H78q-14 0-14-14V77q0-14 14-14Z" fill="#F5FFF9"/>
+ <path d="M175 63v23q0 7 7 7h23Z" fill="#A8E1D4"/>
+ <rect x="81" y="94" width="107" height="72" rx="7" fill="#D2EFE8"/>
+ <path d="M81 152l35-31 20 18 13-12 39 30v2q0 7-7 7H88q-7 0-7-7Z" fill="#147E7C"/>
+ <circle cx="158" cy="111" r="9" fill="#EAB052"/>
+</svg>
