@@ -76,10 +76,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y nsis
           cp assets/app.ico release-input/
+          pe_version="$((10#${APP_VERSION:0:4})).$((10#${APP_VERSION:4:2})).$((10#${APP_VERSION:6:2})).$((10#${APP_VERSION:9:3}))"
           makensis \
             "-DINPUT_DIR=$GITHUB_WORKSPACE/release-input" \
             "-DOUTPUT_FILE=$GITHUB_WORKSPACE/release-output/3wa_mypicsee-v$APP_VERSION-windows-x64-setup.exe" \
-            "-DAPP_VERSION=$APP_VERSION" installer/mypicsee.nsi
+            "-DAPP_VERSION=$APP_VERSION" "-DAPP_PE_VERSION=$pe_version" installer/mypicsee.nsi
       - name: Create checksums
         shell: bash
         run: |

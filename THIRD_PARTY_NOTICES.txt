@@ -1,17 +1,19 @@
-3wa_mypicsee — Third-party notices (Windows x64 GNU preview)
+3wa_mypicsee — Third-party notices (Windows x64 GNU and MSVC)
 
 The application itself is licensed separately in LICENSE. Third-party
 materials keep their own terms. License expressions below are crate metadata
 and do not replace the accompanying license and copyright texts.
 
-Scope: Cargo.lock normal dependency graph for x86_64-pc-windows-gnu,
-including procedural macro dependencies shown by Cargo, egui default fonts,
-and additional standard-library/toolchain runtime attribution.
+Scope: union of Cargo.lock normal dependency graphs for x86_64-pc-windows-gnu,
+and x86_64-pc-windows-msvc. Each Windows build uses one architecture crate.
+This notice also includes procedural macros shown by Cargo, egui default
+fonts, and additional standard-library/toolchain runtime attribution.
 Excluded: unrelated Linux or optional renderer crates and test-only dependencies.
 
-Cargo command: cargo tree --offline --locked --target x86_64-pc-windows-gnu -e normal --prefix none --format "{p}|{l}"
+Cargo command (for each target above):
+cargo tree --offline --locked --target <target> -e normal --prefix none --format "{p}|{l}"
 
-Dependencies (115 package versions):
+Dependencies (116 package versions):
 ab_glyph 0.2.32 | Apache-2.0 | N006
 ab_glyph_rasterizer 0.1.10 | Apache-2.0 | N006
 adler2 2.0.1 | 0BSD OR MIT OR Apache-2.0 | N007, N008, N009
@@ -114,6 +116,7 @@ windows-sys 0.59.0 | MIT OR Apache-2.0 | N082, N083
 windows-sys 0.61.2 | MIT OR Apache-2.0 | N082, N083
 windows-targets 0.52.6 | MIT OR Apache-2.0 | N082, N083
 windows_x86_64_gnu 0.52.6 | MIT OR Apache-2.0 | N082, N083
+windows_x86_64_msvc 0.52.6 | MIT OR Apache-2.0 | N082, N083
 winit 0.30.13 | Apache-2.0 | N020
 writeable 0.6.4 | Unicode-3.0 | N041
 yoke 0.8.4 | Unicode-3.0 | N041
@@ -136,8 +139,8 @@ Emoji Icon Font: Copyright (c) 2014 John Slegers. [N031]
 
 Toolchain attribution:
 Rust 1.92.0 Windows GNU standard library: [N089, N090, N045, N091, N025, N092, N093, N094, N095, N096, N097, N098, N099, N100, N101, N102]
-MinGW-w64 12.0.0-5: [N103]
-Debian MinGW GCC runtime attribution: [N104], [N094]
+MinGW-w64 12.0.0-5 (GNU only): [N103]
+Debian MinGW GCC runtime attribution (GNU only): [N104], [N094]
 
 ========================================================================
 N001
@@ -4746,6 +4749,7 @@ windows-sys 0.59.0: license-apache-2.0
 windows-sys 0.61.2: license-apache-2.0
 windows-targets 0.52.6: license-apache-2.0
 windows_x86_64_gnu 0.52.6: license-apache-2.0
+windows_x86_64_msvc 0.52.6: license-apache-2.0
 ------------------------------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -4957,6 +4961,7 @@ windows-sys 0.59.0: license-mit
 windows-sys 0.61.2: license-mit
 windows-targets 0.52.6: license-mit
 windows_x86_64_gnu 0.52.6: license-mit
+windows_x86_64_msvc 0.52.6: license-mit
 ------------------------------------------------------------------------
 MIT License
 
@@ -13760,7 +13765,7 @@ authorization of the copyright holder.
 
 ========================================================================
 N103
-Debian MinGW-w64 12.0.0-5: upstream component copyright and license inventory
+Debian MinGW-w64 12.0.0-5 (GNU only): upstream component copyright and license inventory
 ------------------------------------------------------------------------
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: mingw-w64
