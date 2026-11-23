@@ -2,6 +2,8 @@
 
 mod navigation;
 mod pipeline;
+mod gps_index;
+mod gps_panel;
 
 use eframe::egui::{self, Color32, ColorImage, Key, PointerButton, Rect, RichText, Sense, TextureHandle, TextureOptions, Vec2};
 use std::{path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}, mpsc::{self, Receiver, Sender}}};
@@ -36,6 +38,7 @@ struct Displayed {
 
 struct Viewer {
     pipeline: pipeline::Pipeline,
+    photo_map: gps_panel::PhotoMap,
     mascot: Option<TextureHandle>,
     selected: Option<PathBuf>,
     displayed: Option<Displayed>,
@@ -68,7 +71,7 @@ impl Viewer {
         let mascot = if initial.is_none() { load_mascot(ctx) } else { None };
 
         let mut viewer = Self {
-            pipeline, mascot, selected: None, displayed: None, paths: Vec::new(),
+            pipeline, photo_map: gps_panel::PhotoMap::default(), mascot, selected: None, displayed: None, paths: Vec::new(),
             generation: 0, folder_generation: Arc::new(AtomicU64::new(0)),
             folder_tx, folder_rx, picker: None, scale: None, pan: Vec2::ZERO,
             lock_pan: false, reset_pan_on_swap: false, has_detail: false, loading: false, wheel_points: 0.0, about_open: false, about_has_cjk: None, fullscreen: false, error: None,
@@ -86,6 +89,7 @@ impl Viewer {
         let path = if path.is_absolute() { path } else {
             std::env::current_dir().map_or_else(|_| path.clone(), |cwd| cwd.join(&path))
         };
+        if self.selected.as_deref().and_then(Path::parent) != path.parent() { self.photo_map.clear_view(); }
         let folder_id = self.folder_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let counter = self.folder_generation.clone();
         let tx = self.folder_tx.clone();
@@ -164,6 +168,16 @@ impl Viewer {
         self.reset_pan_on_swap |= !self.lock_pan;
         self.has_detail = false;
         self.request(PREVIEW_EDGE, step, true);
+    }
+
+    fn jump_to_photo(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if self.selected.as_ref() == Some(&path) { return; }
+        if self.paths.contains(&path) {
+            self.selected = Some(path);
+            self.reset_pan_on_swap |= !self.lock_pan;
+            self.has_detail = false;
+            self.request(PREVIEW_EDGE, 0, true);
+        } else { self.open(ctx, path); }
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -319,6 +333,7 @@ impl eframe::App for Viewer {
                     ui.toggle_value(&mut self.lock_pan, "Lock pan (P)");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("About").clicked() { self.about_open = true; }
+                        if ui.add_enabled(self.selected.is_some(), egui::Button::new("GPS")).clicked() { self.photo_map.open = true; }
                     });
                 });
                 ui.add_space(4.0);
@@ -382,6 +397,8 @@ impl eframe::App for Viewer {
                         egui::FontId::proportional(15.0), Color32::LIGHT_GRAY);
                 }
             });
+
+        if let Some(path) = self.photo_map.show(ctx, self.selected.as_deref()) { self.jump_to_photo(ctx, path); }
 
         if self.about_open {
             if ctx.input(|input| input.key_pressed(Key::Escape)) {
