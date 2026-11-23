@@ -4,11 +4,22 @@ mod navigation;
 mod pipeline;
 mod gps_index;
 mod gps_panel;
+mod system_fonts;
+#[cfg(any(test, all(windows, feature = "photo-webgl")))]
+mod photo_map_bridge;
+#[cfg(all(windows, feature = "photo-webgl"))]
+mod photo_webview;
+#[cfg(all(windows, feature = "photo-webgl"))]
+mod osm_tiles;
 
 use eframe::egui::{self, Color32, ColorImage, Key, PointerButton, Rect, RichText, Sense, TextureHandle, TextureOptions, Vec2};
 use std::{path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicU64, Ordering}, mpsc::{self, Receiver, Sender}}};
 
 const VERSION: &str = include_str!("../RELEASE_VERSION");
+const ACCENT: Color32 = Color32::from_rgb(116, 223, 199);
+const CHROME: Color32 = Color32::from_rgb(24, 35, 42);
+const CANVAS: Color32 = Color32::from_rgb(13, 19, 23);
+const MUTED: Color32 = Color32::from_rgb(163, 181, 188);
 const PREVIEW_EDGE: u32 = 2304;
 const DETAIL_EDGE: u32 = 4096;
 const SUFFIXES: [&str; 8] = ["jpg", "jpeg", "png", "webp", "gif", "tif", "tiff", "bmp"];
@@ -25,7 +36,7 @@ fn main() -> eframe::Result {
         });
     }
     eframe::run_native(
-        &format!("看快寶 | 3wa_mypicsee {}", VERSION.trim()),
+        &format!("快看寶・PicSee {}", VERSION.trim()),
         eframe::NativeOptions { viewport, ..Default::default() },
         Box::new(move |cc| Ok(Box::new(Viewer::new(&cc.egui_ctx, path)))),
     )
@@ -56,7 +67,8 @@ struct Viewer {
     loading: bool,
     wheel_points: f32,
     about_open: bool,
-    about_has_cjk: Option<bool>,
+    system_fonts: system_fonts::CjkFallback,
+
     fullscreen: bool,
     error: Option<String>,
 }
@@ -74,8 +86,9 @@ impl Viewer {
             pipeline, photo_map: gps_panel::PhotoMap::default(), mascot, selected: None, displayed: None, paths: Vec::new(),
             generation: 0, folder_generation: Arc::new(AtomicU64::new(0)),
             folder_tx, folder_rx, picker: None, scale: None, pan: Vec2::ZERO,
-            lock_pan: false, reset_pan_on_swap: false, has_detail: false, loading: false, wheel_points: 0.0, about_open: false, about_has_cjk: None, fullscreen: false, error: None,
+            lock_pan: false, reset_pan_on_swap: false, has_detail: false, loading: false, wheel_points: 0.0, about_open: false, system_fonts: system_fonts::CjkFallback::new(ctx), fullscreen: false, error: None,
         };
+        viewer.system_fonts.request();
         if let Some(path) = initial { viewer.open(ctx, path); }
         viewer
     }
@@ -129,7 +142,7 @@ impl Viewer {
         let (tx, rx) = mpsc::channel();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
-            let path = rfd::FileDialog::new().add_filter("Images", &SUFFIXES).pick_file();
+            let path = rfd::FileDialog::new().set_title("開啟圖片").add_filter("圖片", &SUFFIXES).pick_file();
             let _ = tx.send(path);
             repaint.request_repaint();
         });
@@ -138,6 +151,7 @@ impl Viewer {
 
     fn request(&mut self, max_edge: u32, direction: i32, show_loading: bool) {
         let Some(path) = self.selected.clone() else { return; };
+        self.system_fonts.request_for_path(&path);
         self.generation = self.generation.wrapping_add(1);
         if show_loading {
             self.error = None;
@@ -255,8 +269,8 @@ impl Viewer {
         }
     }
 
-    fn title_line(&self) -> String {
-        let Some(path) = &self.selected else { return format!("Build {}", VERSION.trim()); };
+    fn title_line(&self, zh: bool) -> String {
+        let Some(path) = &self.selected else { return format!("{} {}", if zh { "版本" } else { "Version" }, VERSION.trim()); };
         let name = path.file_name().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into_owned());
         let dims = self.displayed.as_ref().filter(|_| !self.loading).map_or_else(String::new, |d| {
             format!("   •   {:.0} × {:.0}", d.natural.x, d.natural.y)
@@ -267,17 +281,39 @@ impl Viewer {
 
 fn viewer_status(ctx: &egui::Context, title: String, loading: bool) {
     // A filename or a pending decode must not resize the image viewport.
-    egui::TopBottomPanel::bottom("status").exact_height(24.0).show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            if loading { ui.add(egui::Spinner::new().size(14.0)); }
-            ui.add(egui::Label::new(&title).truncate()).on_hover_text(&title);
+    egui::TopBottomPanel::bottom("status").exact_height(28.0)
+        .frame(egui::Frame::new().fill(CHROME).inner_margin(egui::Margin::symmetric(10, 5)))
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if loading { ui.add(egui::Spinner::new().size(13.0).color(ACCENT)); }
+                ui.add(egui::Label::new(RichText::new(&title).small().color(MUTED)).truncate()).on_hover_text(&title);
+            });
         });
-    });
+}
+
+fn cjk_ready(ctx: &egui::Context) -> bool {
+    ctx.fonts_mut(|fonts| fonts.has_glyphs(&egui::FontId::proportional(14.0), "快看寶開啟圖片縮放地圖關於"))
+}
+
+fn ui_error(error: &str, zh: bool) -> String {
+    if !zh { return error.to_owned(); }
+    let summary = match error {
+        "Choose a JPEG, PNG, WebP, GIF, TIFF, or BMP image." =>
+            "請選擇 JPEG、PNG、WebP、GIF、TIFF 或 BMP 圖片。",
+        "Image file does not exist or is not a regular file" => "找不到圖片，或所選項目不是檔案。",
+        "Not a regular file or input exceeds 128 MiB" => "不是一般檔案，或檔案超過 128 MiB。",
+        "Unsupported image format" => "不支援這個圖片格式。",
+        "Image exceeds the preview size limit" => "圖片尺寸超過預覽上限。",
+        _ => return format!("無法開啟圖片\n{error}"),
+    };
+    summary.to_owned()
 }
 
 impl eframe::App for Viewer {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll(ctx);
+        let zh = cjk_ready(ctx);
+        let tr = |chinese: &'static str, english: &'static str| if zh { chinese } else { english };
         let (f11, escape) = ctx.input(|i| (i.key_pressed(Key::F11), i.key_pressed(Key::Escape)));
         if !self.about_open && (f11 || (self.fullscreen && escape)) {
             self.fullscreen = !self.fullscreen;
@@ -317,31 +353,51 @@ impl eframe::App for Viewer {
         let mut fit = star;
         let mut zoom = if plus { 1.25 } else if minus { 0.8 } else { 1.0 };
         if !self.fullscreen {
-            egui::TopBottomPanel::top("tools").show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("PICSEE").strong().color(Color32::from_rgb(99, 219, 196)));
-                    ui.separator();
-                    if ui.button("Open…").on_hover_text("Ctrl+O").clicked() { self.choose_file(ctx); }
-                    if ui.button("Prev").on_hover_text("Previous image").clicked() { self.navigate(-1); }
-                    if ui.button("Next").on_hover_text("Next image").clicked() { self.navigate(1); }
-                    ui.separator();
-                    if ui.button("Fit *").on_hover_text("Fit the current image and lock the scale").clicked() { fit = true; }
-                    if ui.button("−").clicked() { zoom = 0.8; }
-                    ui.label(self.scale.map_or_else(|| "Fit".into(), |x| format!("{:.0}%", x * 100.0)));
-                    if ui.button("+").clicked() { zoom = 1.25; }
-                    ui.toggle_value(&mut self.lock_pan, "Lock pan (P)");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("About").clicked() { self.about_open = true; }
-                        if ui.add_enabled(self.selected.is_some(), egui::Button::new("GPS")).clicked() { self.photo_map.open = true; }
+            egui::TopBottomPanel::top("tools")
+                .frame(egui::Frame::new().fill(CHROME).inner_margin(egui::Margin::symmetric(10, 6)))
+                .show(ctx, |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(5.0, 3.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(tr("快看寶", "PicSee")).strong().color(ACCENT));
+                        ui.separator();
+                        if ui.button(tr("開啟…", "Open…")).on_hover_text("Ctrl+O").clicked() {
+                            self.choose_file(ctx);
+                        }
+                        if ui.button(tr("上一張", "Previous")).on_hover_text("Page Up").clicked() {
+                            self.navigate(-1);
+                        }
+                        if ui.button(tr("下一張", "Next")).on_hover_text("Page Down").clicked() {
+                            self.navigate(1);
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button(tr("適合視窗", "Fit")).on_hover_text(tr("符合視窗大小，並保留縮放比例（*）", "Fit and keep this scale (*)")).clicked() {
+                                fit = true;
+                            }
+                            if ui.button("−").on_hover_text(tr("縮小", "Zoom out")).clicked() { zoom = 0.8; }
+                            ui.add_sized([41.0, 18.0], egui::Label::new(RichText::new(
+                                self.scale.map_or_else(|| tr("自動", "Auto").into(), |x| format!("{:.0}%", x * 100.0))
+                            ).small().color(MUTED)));
+                            if ui.button("+").on_hover_text(tr("放大", "Zoom in")).clicked() { zoom = 1.25; }
+                            ui.toggle_value(&mut self.lock_pan, tr("鎖定位置", "Lock position"))
+                                .on_hover_text(tr("切換照片時保留拖曳位置（P）", "Keep pan when changing photos (P)"));
+                        });
+                        ui.separator();
+                        if ui.add_enabled(self.selected.is_some(), egui::Button::new(tr("照片地圖", "Photo map"))).clicked() {
+                            self.photo_map.open = true;
+                        }
+                        if ui.button(tr("全螢幕", "Full screen")).on_hover_text("F11").clicked() {
+                            self.fullscreen = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                        }
+                        if ui.button(tr("關於", "About")).clicked() { self.about_open = true; }
                     });
                 });
-                ui.add_space(4.0);
-            });
-            viewer_status(ctx, self.title_line(), self.loading);
+            viewer_status(ctx, self.title_line(zh), self.loading);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(Color32::from_rgb(15, 20, 23)))
+            .frame(egui::Frame::NONE.fill(CANVAS))
             .show(ctx, |ui| {
                 let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
                 if response.hovered() {
@@ -385,30 +441,29 @@ impl eframe::App for Viewer {
                         painter.image(mika.id(), target, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
                     }
                     let button = Rect::from_center_size(rect.center() + egui::vec2(0.0, (rect.height()*0.36).min(160.0)), egui::vec2(180.0, 36.0));
-                    if ui.put(button, egui::Button::new("Open photo…")).clicked() { self.choose_file(ctx); }
+                    if ui.put(button, egui::Button::new(RichText::new(tr("開啟照片", "Open photo")).strong().color(CANVAS))
+                        .fill(ACCENT).corner_radius(8.0)).clicked() { self.choose_file(ctx); }
                     painter.text(button.center_bottom() + egui::vec2(0.0, 10.0), egui::Align2::CENTER_TOP,
-                        "Or drop an image here", egui::FontId::proportional(13.0), Color32::LIGHT_GRAY);
+                        tr("也可以把圖片拖進視窗", "Or drop an image here"), egui::FontId::proportional(13.0), MUTED);
                 }
                 if let Some(error) = &self.error {
-                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, error,
+                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, ui_error(error, zh),
                         egui::FontId::proportional(15.0), Color32::from_rgb(255, 178, 143));
                 } else if self.loading && self.displayed.is_none() {
-                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Opening image…",
+                    painter.text(rect.center(), egui::Align2::CENTER_CENTER, tr("正在開啟圖片…", "Opening image…"),
                         egui::FontId::proportional(15.0), Color32::LIGHT_GRAY);
                 }
             });
 
-        if let Some(path) = self.photo_map.show(ctx, self.selected.as_deref()) { self.jump_to_photo(ctx, path); }
+        if let Some(path) = self.photo_map.show(ctx, self.selected.as_deref(), (!self.about_open).then_some(&*frame)) { self.jump_to_photo(ctx, path); }
 
         if self.about_open {
             if ctx.input(|input| input.key_pressed(Key::Escape)) {
                 self.about_open = false;
             } else {
-                if self.about_has_cjk.is_none() {
-                    self.about_has_cjk = Some(init_about_font(ctx));
-                    if self.mascot.is_none() { self.mascot = load_mascot(ctx); }
-                }
-                egui::Window::new("About PicSee")
+                if self.mascot.is_none() { self.mascot = load_mascot(ctx); }
+                egui::Window::new(tr("關於快看寶", "About PicSee"))
+                    .id(egui::Id::new("picsee-about"))
                     .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
                     .collapsible(false)
                     .resizable(false)
@@ -420,20 +475,17 @@ impl eframe::App for Viewer {
                                 ui.image((mika.id(), size * (120.0 / size.y)));
                             }
                             ui.vertical(|ui| {
-                                ui.heading("3wa_mypicsee");
-                                ui.label(format!("Version {}", VERSION.trim()));
-                                ui.label("An offline photo viewer.");
+                                ui.heading(RichText::new(tr("快看寶", "PicSee")).color(ACCENT));
+                                ui.label(RichText::new(format!("3wa_mypicsee · {}", VERSION.trim())).small().color(MUTED));
+                                ui.label(tr("快速、離線的照片瀏覽器", "A fast, offline photo viewer"));
                                 ui.separator();
-                                if self.about_has_cjk == Some(true) {
-                                    ui.label("作者：阿寶");
-                                    ui.label("點子：羽山");
-                                } else {
-                                    ui.label("Author: Abao");
-                                    ui.label("Concept: Yushan");
-                                }
-                                ui.label("MIT License");
-                                ui.hyperlink_to("3wa.tw", "https://3wa.tw");
-                                ui.hyperlink_to("GitHub project", "https://github.com/shadowjohn/3wa_mypicsee");
+                                ui.label(tr("作者：阿寶", "Author: Abao"));
+                                ui.label(tr("點子：羽山", "Concept: Yushan"));
+                                ui.label(tr("MIT 授權", "MIT License"));
+                                ui.horizontal(|ui| {
+                                    ui.hyperlink_to("3wa.tw", "https://3wa.tw");
+                                    ui.hyperlink_to(tr("GitHub 專案", "GitHub project"), "https://github.com/shadowjohn/3wa_mypicsee");
+                                });
                             });
                         });
                     });
@@ -448,26 +500,6 @@ fn load_mascot(ctx: &egui::Context) -> Option<TextureHandle> {
     Some(ctx.load_texture("mika", ColorImage::from_rgba_unmultiplied(
         [image.width() as usize, image.height() as usize], image.as_raw(),
     ), TextureOptions::LINEAR))
-}
-
-fn init_about_font(ctx: &egui::Context) -> bool {
-    // Do not bundle Windows fonts or touch them during a normal photo open.
-    #[cfg(windows)]
-    if let Some(root) = std::env::var_os("SystemRoot") {
-        for font in ["msjh.ttc", "mingliu.ttc", "msyh.ttc"] {
-            let path = PathBuf::from(&root).join("Fonts").join(font);
-            if let Ok(data) = std::fs::read(path) {
-                let mut fonts = egui::FontDefinitions::default();
-                fonts.font_data.insert("PicSee CJK fallback".into(), Arc::new(egui::FontData::from_owned(data)));
-                fonts.families.entry(egui::FontFamily::Proportional).or_default()
-                    .push("PicSee CJK fallback".into());
-                ctx.set_fonts(fonts);
-                return true;
-            }
-        }
-    }
-    let _ = ctx;
-    false
 }
 
 fn supported(path: &Path) -> bool {

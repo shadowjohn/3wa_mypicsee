@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>快看寶｜照片地圖</title>
+  <link rel="stylesheet" href="map.css">
+  <script defer src="engine.js"></script>
+  <script defer src="points.js"></script>
+  <script defer src="adapter.js"></script>
+</head>
+<body>
+  <main id="map" aria-label="照片拍攝點位"></main>
+  <span id="compass" class="map-badge" aria-label="北方">↑ 北</span>
+  <p id="legend" class="map-badge" role="status">離線格線 · 無地理底圖</p>
+</body>
+</html>

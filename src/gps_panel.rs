@@ -1,5 +1,7 @@
 use crate::gps_index::{self, Scan, Scope};
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke};
+#[cfg(all(windows, feature = "photo-webgl"))]
+use crate::photo_webview::WebPhotoMap;
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, RichText, Sense, Stroke};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -8,6 +10,9 @@ use std::{
         mpsc::{self, Receiver, TryRecvError},
     },
 };
+
+const TEAL: Color32 = Color32::from_rgb(122, 210, 191);
+const WARN: Color32 = Color32::from_rgb(234, 184, 117);
 
 enum Action {
     Scan(Scope),
@@ -31,16 +36,144 @@ pub(crate) struct PhotoMap {
     running: Option<Running>,
     label: String,
     message: Option<String>,
+    message_detail: Option<String>,
     scan: Option<Scan>,
+    #[cfg(all(windows, feature = "photo-webgl"))]
+    web: Option<WebPhotoMap>,
+    #[cfg(all(windows, feature = "photo-webgl"))]
+    map_revision: u32,
+    #[cfg(all(windows, feature = "photo-webgl"))]
+    cluster: Vec<usize>,
+    #[cfg(all(windows, feature = "photo-webgl"))]
+    map_error: Option<String>,
 }
 
 impl PhotoMap {
+    fn invalidate_map(&mut self) {
+        #[cfg(all(windows, feature = "photo-webgl"))]
+        {
+            self.map_revision = self.map_revision.wrapping_add(1).max(1);
+            self.cluster.clear();
+        }
+    }
+
+    #[cfg(all(windows, feature = "photo-webgl"))]
+    fn show_web(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        frame: Option<&eframe::Frame>,
+        selected: Option<&Path>,
+    ) -> Option<PathBuf> {
+        if ui
+            .button(if self.web.is_some() {
+                "收起互動地圖"
+            } else {
+                "開啟互動地圖"
+            })
+            .clicked()
+        {
+            self.map_error = None;
+            if self.web.is_some() {
+                self.web = None;
+                self.cluster.clear();
+            } else if let Some(frame) = frame {
+                match WebPhotoMap::new(frame, ctx) {
+                    Ok(web) => self.web = Some(web),
+                    Err(error) => self.map_error = Some(error),
+                }
+            }
+        }
+        if let Some(message) = &self.map_error {
+            ui.label(RichText::new(message).color(WARN));
+        }
+
+        let web = self.web.as_mut()?;
+        ui.add_space(3.0);
+        let mut online = web.osm_enabled();
+        if ui
+            .add_enabled(
+                web.is_ready() && frame.is_some(),
+                egui::Checkbox::new(&mut online, "使用 OpenStreetMap（連線）"),
+            )
+            .changed()
+            && let Err(error) = web.set_osm(online)
+        {
+            ui.label(format!("無法切換底圖：{error}"));
+        }
+        ui.label(
+            RichText::new("開啟連線底圖後，OpenStreetMap 會收到目前瀏覽的區域與你的 IP。")
+                .small()
+                .weak(),
+        );
+        if web.osm_enabled() {
+            ui.label(
+                RichText::new("底圖無法載入時，仍會顯示離線格線。")
+                    .small()
+                    .weak(),
+            );
+            ui.hyperlink_to(
+                "© OpenStreetMap contributors",
+                "https://www.openstreetmap.org/copyright",
+            );
+        }
+        let (space, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 230.0), Sense::hover());
+        if !web.is_ready() {
+            let painter = ui.painter_at(space);
+            painter.rect_filled(space, 6.0, Color32::from_rgb(19, 32, 44));
+            painter.text(
+                space.center(),
+                Align2::CENTER_CENTER,
+                "正在啟動互動地圖…",
+                FontId::proportional(14.0),
+                TEAL,
+            );
+        }
+        let bounds = if frame.is_some() {
+            space
+                .intersect(ui.clip_rect())
+                .intersect(ctx.viewport_rect())
+        } else {
+            egui::Rect::ZERO
+        };
+        let points = self
+            .scan
+            .as_ref()
+            .map_or(&[][..], |scan| scan.locations.as_slice());
+        let active = selected.and_then(|s| points.iter().position(|(path, _)| path == s));
+        let result = web
+            .place(bounds, ctx.pixels_per_point())
+            .and_then(|_| web.tick(ctx, self.map_revision.max(1), points, active));
+        match result {
+            Ok(Some(ids)) if ids.len() == 1 => {
+                self.cluster.clear();
+                return points.get(ids[0]).map(|(path, _)| path.clone());
+            }
+            Ok(Some(ids)) => self.cluster = ids,
+            Ok(None) => {}
+            Err(error) => {
+                self.web = None;
+                self.cluster.clear();
+                self.map_error = Some(format!("{error} 已切回內建離線點圖。"));
+                ctx.request_repaint();
+            }
+        }
+        None
+    }
+
     pub fn clear_view(&mut self) {
+        #[cfg(all(windows, feature = "photo-webgl"))]
+        if let Some(web) = &mut self.web {
+            let _ = web.set_osm(false);
+        }
         if let Some(run) = &self.running {
             run.cancel.store(true, Ordering::Relaxed);
         }
         self.scan = None;
+        self.invalidate_map();
         self.message = None;
+        self.message_detail = None;
         self.label.clear();
     }
 
@@ -49,7 +182,9 @@ impl PhotoMap {
             return;
         }
         self.message = None;
+        self.message_detail = None;
         self.scan = None;
+        self.invalidate_map();
         self.label = match &action {
             Action::Scan(scope) => scope.path().display().to_string(),
             Action::Clear => String::new(),
@@ -76,7 +211,10 @@ impl PhotoMap {
                     cancellable,
                 })
             }
-            Err(e) => self.message = Some(format!("Cannot start GPS worker: {e}")),
+            Err(e) => {
+                self.message = Some("無法啟動 GPS 掃描。".into());
+                self.message_detail = Some(e.to_string());
+            }
         }
     }
 
@@ -93,34 +231,57 @@ impl PhotoMap {
         self.running = None;
         match result {
             Some(Outcome::Scan(_)) if cancelled => {
-                self.message = Some("Scan stopped. Previously indexed rows remain local.".into())
+                self.message = Some("已停止掃描。已建立的索引仍保存在本機。".into())
             }
-            Some(Outcome::Scan(Ok(scan))) => self.scan = Some(scan),
-            Some(Outcome::Scan(Err(e)) | Outcome::Clear(Err(e))) => self.message = Some(e),
-            Some(Outcome::Clear(Ok(()))) => self.message = Some("Local GPS index cleared.".into()),
-            None => self.message = Some("GPS worker ended without a result.".into()),
+            Some(Outcome::Scan(Ok(scan))) => {
+                self.invalidate_map();
+                self.scan = Some(scan);
+            }
+            Some(Outcome::Scan(Err(e))) => {
+                self.message = Some("無法取得掃描結果。".into());
+                self.message_detail = Some(e);
+            }
+            Some(Outcome::Clear(Err(e))) => {
+                self.message = Some("無法清除 GPS 索引。".into());
+                self.message_detail = Some(e);
+            }
+            Some(Outcome::Clear(Ok(()))) => self.message = Some("已清除本機 GPS 索引。".into()),
+            None => self.message = Some("GPS 掃描未傳回結果。".into()),
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, selected: Option<&Path>) -> Option<PathBuf> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        selected: Option<&Path>,
+        _frame: Option<&eframe::Frame>,
+    ) -> Option<PathBuf> {
         self.poll();
         if !self.open {
             return None;
         }
         let mut open = self.open;
         let mut jump = None;
-        egui::Window::new("Photo locations")
+        #[cfg(all(windows, feature = "photo-webgl"))]
+        let mut clear_cluster = false;
+        egui::Window::new("照片地圖")
             .open(&mut open)
             .default_width(430.0)
             .max_width(700.0)
             .show(ctx, |ui| {
-                ui.label("Offline GPS coordinate plot (no basemap). JPG/JPEG only.");
+                ui.label(RichText::new("拍攝位置").strong().size(15.0));
+                ui.label(
+                    RichText::new("從 JPG／JPEG 照片讀取拍攝位置，預設離線。")
+                        .small()
+                        .weak(),
+                );
+                ui.add_space(5.0);
                 let busy = self.running.is_some();
                 ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(
                             !busy && selected.is_some_and(gps_index::is_jpeg),
-                            egui::Button::new("This photo"),
+                            egui::Button::new("讀取這張"),
                         )
                         .clicked()
                         && let Some(path) = selected
@@ -130,7 +291,7 @@ impl PhotoMap {
                     if ui
                         .add_enabled(
                             !busy && selected.and_then(Path::parent).is_some(),
-                            egui::Button::new("Scan current folder"),
+                            egui::Button::new(RichText::new("掃描此資料夾").strong()),
                         )
                         .clicked()
                         && let Some(folder) = selected.and_then(Path::parent)
@@ -138,7 +299,7 @@ impl PhotoMap {
                         self.start(ctx, Action::Scan(Scope::Folder(folder.into())));
                     }
                     if ui
-                        .add_enabled(!busy, egui::Button::new("Clear index"))
+                        .add_enabled(!busy, egui::Button::new("清除索引"))
                         .clicked()
                     {
                         self.start(ctx, Action::Clear);
@@ -146,10 +307,23 @@ impl PhotoMap {
                     if let Some(run) = &self.running {
                         let stopping = run.cancel.load(Ordering::Relaxed);
                         ui.spinner();
+                        ui.label(
+                            RichText::new(if run.cancellable {
+                                "正在掃描…"
+                            } else {
+                                "正在清除…"
+                            })
+                            .small()
+                            .weak(),
+                        );
                         if ui
                             .add_enabled(
                                 run.cancellable && !stopping,
-                                egui::Button::new(if stopping { "Stopping…" } else { "Cancel" }),
+                                egui::Button::new(if stopping {
+                                    "正在停止…"
+                                } else {
+                                    "取消"
+                                }),
                             )
                             .clicked()
                         {
@@ -158,40 +332,118 @@ impl PhotoMap {
                     }
                 });
                 if !self.label.is_empty() {
-                    ui.add(egui::Label::new(&self.label).truncate())
+                    ui.add(egui::Label::new(RichText::new(&self.label).small().weak()).truncate())
                         .on_hover_text(&self.label);
                 }
                 if let Some(message) = &self.message {
-                    ui.label(message);
+                    let notice = ui.label(RichText::new(message).color(
+                        if self.message_detail.is_some() {
+                            WARN
+                        } else {
+                            TEAL
+                        },
+                    ));
+                    if let Some(detail) = &self.message_detail {
+                        notice.on_hover_text(detail);
+                    }
+                }
+                #[cfg(all(windows, feature = "photo-webgl"))]
+                {
+                    jump = self.show_web(ui, ctx, _frame, selected);
                 }
                 if let Some(scan) = &self.scan {
-                    ui.label(format!(
-                        "{} located · {} without GPS · {} unreadable · {} cache hits",
-                        scan.locations.len(),
-                        scan.no_gps,
-                        scan.errors,
-                        scan.cache_hits
-                    ));
+                    ui.add_space(5.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!("{} 張有定位", scan.locations.len()))
+                                .small()
+                                .strong()
+                                .color(TEAL),
+                        );
+                        ui.label(
+                            RichText::new(format!("{} 張無定位", scan.no_gps))
+                                .small()
+                                .weak(),
+                        );
+                        if scan.errors != 0 {
+                            ui.label(
+                                RichText::new(format!("{} 張無法讀取", scan.errors))
+                                    .small()
+                                    .color(WARN),
+                            );
+                        }
+                        if scan.cache_hits != 0 {
+                            ui.label(
+                                RichText::new(format!("{} 張來自快取", scan.cache_hits))
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                    });
                     if let Some(e) = &scan.first_error {
-                        ui.add(egui::Label::new(e).truncate()).on_hover_text(e);
+                        ui.label(RichText::new("查看讀取失敗的原因").small().color(WARN))
+                            .on_hover_text(e);
                     }
                     if scan.truncated {
                         ui.label(format!(
-                            "Stopped at {} JPEG files; results are partial.",
+                            "已達 {} 張 JPEG 的掃描上限，以下為部分結果。",
                             gps_index::LIMIT
                         ));
                     }
-                    if !scan.locations.is_empty() {
-                        jump = plot(ui, &scan.locations, selected);
-                        ui.label("Choose a photo below when pins overlap.");
+                    if scan.locations.is_empty() {
+                        ui.label(RichText::new("此範圍沒有可顯示的拍攝位置。").small().weak());
+                    } else {
+                        #[cfg(all(windows, feature = "photo-webgl"))]
+                        let cluster = self.cluster.as_slice();
+                        #[cfg(not(all(windows, feature = "photo-webgl")))]
+                        let cluster: &[usize] = &[];
+                        #[cfg(all(windows, feature = "photo-webgl"))]
+                        let native = self.web.is_none();
+                        #[cfg(not(all(windows, feature = "photo-webgl")))]
+                        let native = true;
+                        if native {
+                            jump = plot(ui, &scan.locations, selected);
+                        }
+                        let row_count = if cluster.is_empty() {
+                            scan.locations.len()
+                        } else {
+                            cluster.len()
+                        };
+                        if cluster.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new("照片清單").small().strong());
+                            ui.label(
+                                RichText::new("點位重疊時，可從清單挑選照片。")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                        #[cfg(all(windows, feature = "photo-webgl"))]
+                        if !cluster.is_empty() {
+                            let show_all = ui
+                                .horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("此處有 {} 張照片", cluster.len()))
+                                            .small()
+                                            .strong(),
+                                    );
+                                    ui.button("顯示全部").clicked()
+                                })
+                                .inner;
+                            if show_all {
+                                ctx.request_repaint();
+                                clear_cluster = true;
+                            }
+                        }
                         let row = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
                         egui::ScrollArea::vertical().max_height(140.0).show_rows(
                             ui,
                             row,
-                            scan.locations.len(),
+                            row_count,
                             |ui, rows| {
                                 for i in rows {
-                                    let (path, point) = &scan.locations[i];
+                                    let index = cluster.get(i).copied().unwrap_or(i);
+                                    let (path, point) = &scan.locations[index];
                                     let file =
                                         path.file_name().unwrap_or_default().to_string_lossy();
                                     if ui
@@ -210,6 +462,17 @@ impl PhotoMap {
                 }
             });
         self.open = open;
+        #[cfg(all(windows, feature = "photo-webgl"))]
+        {
+            if clear_cluster {
+                self.cluster.clear();
+            }
+            if !open {
+                self.web = None;
+                self.cluster.clear();
+                self.map_error = None;
+            }
+        }
         jump
     }
 }
@@ -231,12 +494,12 @@ fn plot(
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 170.0), Sense::click());
     let inner = frame.shrink(18.0);
     let paint = ui.painter_at(frame);
-    paint.rect_filled(frame, 6.0, Color32::from_rgb(18, 30, 38));
+    paint.rect_filled(frame, 6.0, Color32::from_rgb(18, 31, 42));
     for i in 0..=4 {
         let t = i as f32 / 4.0;
         let x = egui::lerp(inner.x_range(), t);
         let y = egui::lerp(inner.y_range(), t);
-        let grid = Stroke::new(1.0, Color32::from_rgb(40, 60, 66));
+        let grid = Stroke::new(1.0, Color32::from_rgb(43, 63, 75));
         paint.line_segment(
             [Pos2::new(x, inner.top()), Pos2::new(x, inner.bottom())],
             grid,
@@ -290,7 +553,7 @@ fn plot(
     paint.text(
         frame.right_top() + egui::vec2(-5.0, 4.0),
         Align2::RIGHT_TOP,
-        "N ↑",
+        "↑ 北",
         FontId::proportional(12.0),
         Color32::LIGHT_GRAY,
     );

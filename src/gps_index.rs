@@ -31,8 +31,18 @@ fn axis(
     let malformed = || "Invalid GPS coordinate in JPEG EXIF".to_string();
     let degrees = exif.get_field(coord, In::PRIMARY).ok_or_else(malformed)?;
     let direction = exif.get_field(side, In::PRIMARY).ok_or_else(malformed)?;
-    let Value::Rational(raw) = &degrees.value else {
-        return Err(malformed());
+    let [d, m, s] = match &degrees.value {
+        Value::Rational(raw) if raw.len() == 3 && raw.iter().all(|r| r.denom != 0) => {
+            [raw[0].to_f64(), raw[1].to_f64(), raw[2].to_f64()]
+        }
+        // Some cameras store D/M/S as SRATIONAL. Magnitude must still be
+        // nonnegative; hemisphere is carried by the separate GPS ref tag.
+        Value::SRational(raw)
+            if raw.len() == 3 && raw.iter().all(|r| r.num >= 0 && r.denom > 0) =>
+        {
+            [raw[0].to_f64(), raw[1].to_f64(), raw[2].to_f64()]
+        }
+        _ => return Err(malformed()),
     };
     let Value::Ascii(dir) = &direction.value else {
         return Err(malformed());
@@ -42,10 +52,6 @@ fn axis(
         [dir] if dir.as_slice() == [neg] => -1.0,
         _ => return Err(malformed()),
     };
-    if raw.len() != 3 || raw.iter().any(|x| x.denom == 0) {
-        return Err(malformed());
-    }
-    let (d, m, s) = (raw[0].to_f64(), raw[1].to_f64(), raw[2].to_f64());
     let result = d + m / 60.0 + s / 3600.0;
     if m >= 60.0 || s >= 60.0 || result > max {
         return Err(malformed());
@@ -463,6 +469,24 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn common_signed_gps_rationals_keep_hemisphere_and_reject_invalid_components() {
+        let mut jpeg = gps_jpeg();
+        // TIFF type 10 = SRATIONAL. Nonnegative D/M/S still use the ASCII hemisphere.
+        for tiff_offset in [42, 66] {
+            jpeg[12 + tiff_offset] = 10;
+        }
+        let point = read_jpeg(Cursor::new(&jpeg)).unwrap().unwrap();
+        assert!((point.lat + 25.5).abs() < 1e-9);
+        assert!((point.lon + 121.25).abs() < 1e-9);
+        jpeg[92..96].copy_from_slice(&(-25i32).to_le_bytes());
+        assert!(read_jpeg(Cursor::new(&jpeg)).is_err());
+        jpeg[92..96].copy_from_slice(&25i32.to_le_bytes());
+        jpeg[96..100].copy_from_slice(&0i32.to_le_bytes());
+        assert!(read_jpeg(Cursor::new(&jpeg)).is_err());
+    }
+
 
     #[test]
     fn distinguishes_absent_gps_from_unreadable_metadata() {
